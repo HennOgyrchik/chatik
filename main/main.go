@@ -12,7 +12,6 @@ import (
 var wg sync.WaitGroup
 
 func main() {
-	ch := make(chan int)
 
 	listener, err := net.Listen("tcp", ":4545")
 
@@ -31,7 +30,7 @@ func main() {
 			continue
 		}
 		wg.Add(1)
-		go welcome(conn, ch) // запускаем горутину для обработки запроса
+		go welcome(conn) // запускаем горутину для обработки запроса
 	}
 
 	wg.Wait()
@@ -48,7 +47,7 @@ func dbConnection() *sql.DB {
 	return db
 }
 
-func welcome(conn net.Conn, ch chan int) {
+func welcome(conn net.Conn) {
 
 	for {
 		conn.Write([]byte("У вас имеется учетная запись? (y/n):"))
@@ -61,10 +60,10 @@ func welcome(conn net.Conn, ch chan int) {
 		}
 		answ := strings.ToLower(string(buff[0:n]))
 		if answ == "n" {
-			registration(conn, ch)
+			registration(conn)
 			break
 		} else if answ == "y" {
-			authorization(conn, ch)
+			authorization(conn)
 			break
 		}
 
@@ -75,7 +74,7 @@ func welcome(conn net.Conn, ch chan int) {
 
 }
 
-func registration(conn net.Conn, ch chan int) {
+func registration(conn net.Conn) {
 	var login, password, passwordConfirmed string
 	for {
 		conn.Write([]byte("Придумайте никнейм:"))
@@ -125,10 +124,10 @@ func registration(conn net.Conn, ch chan int) {
 	}
 	conn.Write([]byte("Регистрация прошла успешно!\n"))
 	db.Close()
-	authorization(conn, ch)
+	authorization(conn)
 }
 
-func authorization(conn net.Conn, ch chan int) {
+func authorization(conn net.Conn) {
 
 	db := dbConnection()
 
@@ -166,9 +165,23 @@ func authorization(conn net.Conn, ch chan int) {
 		}
 
 		if login == loginFromDb && password == passwordFromDb {
-			conn.Write([]byte("login " + login))
-			wg.Add(1)
-			go sender(&wg, conn, db, login, ch)
+
+			wg.Add(2)
+			go sender(&wg, conn, db, login)
+			go mailing(&wg, conn, db)
+			_, err = db.Query("insert into chatlog values (default, 'Server', 'Пользователь " + login + " присоединился')")
+			if err != nil {
+				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
+			}
+			var a, b string
+			row = db.QueryRow("select login, message from chatlog order by id desc limit 1")
+			err = row.Scan(&a, &b)
+			if err != nil {
+				fmt.Printf("Ошибка:", err)
+			}
+
+			conn.Write([]byte(a + ": " + b + "\n"))
+
 			break
 		} else {
 			conn.Write([]byte("Неверный логин/пароль\n"))
@@ -183,7 +196,7 @@ func authorization(conn net.Conn, ch chan int) {
 	wg.Done()
 }
 
-func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, ch chan int) { //отправка принятых сообщений в БД
+func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string) { //отправка принятых сообщений в БД
 	for {
 		buff := make([]byte, 1024)
 
@@ -197,29 +210,42 @@ func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, ch chan
 				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
 			}
 		}
-		/*ch <- 111
-
-		timeout := time.After(time.Second)
-		select {
-		case res := <-ch:
-			fmt.Println(res)
-		case <-timeout:
-			continue
-		}*/
-		mailing(conn, db)
 
 	}
 
-	wg.Done()
+	//wg.Done()
 }
 
-func mailing(conn net.Conn, db *sql.DB) {
-	row := db.QueryRow("select login, message from chatlog order by id desc limit 1")
+func mailing(wg *sync.WaitGroup, conn net.Conn, db *sql.DB) {
 
+	row := db.QueryRow("select id from chatlog order by id desc limit 1")
+	var firstId, id int
 	var login, message string
-	err := row.Scan(&login, &message)
+
+	err := row.Scan(&firstId)
 	if err != nil {
 		fmt.Printf("Ошибка:", err)
+		_, err = db.Query("insert into chatlog values (default, ' ', ' ')")
+		if err != nil {
+			fmt.Println("Ошибка отправки сообщения в таблицу:", err)
+		}
+		fmt.Println("Вставка пустой строки в пустую таблицу")
+		firstId = 1
 	}
-	conn.Write([]byte(login + ": " + message + "\n"))
+	for {
+		row = db.QueryRow("select id, login, message from chatlog order by id desc limit 1")
+		err = row.Scan(&id, &login, &message)
+		if err != nil {
+			fmt.Printf("Ошибка:", err)
+		}
+		if id != firstId {
+			conn.Write([]byte(login + ": " + message + "\n"))
+			firstId = id
+		} else {
+			continue
+		}
+
+	}
+	//wg.Done()
+
 }
