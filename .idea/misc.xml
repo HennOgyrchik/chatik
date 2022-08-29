@@ -4,15 +4,7 @@
     <option name="openedFilesInfos">
       <list>
         <OpenedFileInfo>
-          <option name="caretOffset" value="48" />
-          <option name="fileUrl" value="file://$PROJECT_DIR$/go.mod" />
-        </OpenedFileInfo>
-        <OpenedFileInfo>
-          <option name="caretOffset" value="5" />
-          <option name="fileUrl" value="file://$PROJECT_DIR$/.gitignore" />
-        </OpenedFileInfo>
-        <OpenedFileInfo>
-          <option name="caretOffset" value="0" />
+          <option name="caretOffset" value="4641" />
           <option name="fileUrl" value="file://$PROJECT_DIR$/main/main.go" />
         </OpenedFileInfo>
       </list>
