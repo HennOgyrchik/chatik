@@ -9,6 +9,8 @@ import (
 	"sync"
 )
 
+var mapConn map[string]chan bool
+
 func main() {
 	var wg sync.WaitGroup
 	listener, err := net.Listen("tcp", ":4545")
@@ -20,9 +22,9 @@ func main() {
 	defer listener.Close()
 	fmt.Println("Server is running...")
 
-	var chanList []chan bool
-	mainChan := make(chan byte)
-	go mainChanListener(mainChan, chanList, &wg)
+	mapConn = make(map[string]chan bool)
+	mainChan := make(chan string)
+	go mainChanListener(mainChan)
 
 	for {
 		conn, err := listener.Accept()
@@ -31,34 +33,43 @@ func main() {
 			conn.Close()
 			continue
 		}
+
 		ch := make(chan bool)
 		wg.Add(1)
 
 		go welcome(conn, ch, mainChan, &wg)
-		chanList = append(chanList, ch)
-		wg.Add(1)
-		mainChan <- 1
-		go mainChanListener(mainChan, chanList, &wg)
+
+		mapConn[conn.RemoteAddr().String()] = ch
+
 	}
 
 	wg.Wait()
 
 }
 
-func mainChanListener(mainChan chan byte, list []chan bool, wg *sync.WaitGroup) {
+//управление рассылкой последнего сообщения всем пользователям
+func mainChanListener(mainChan chan string) {
 	for {
-		val := <-mainChan
-		if val == 1 {
-			break
-		} else if val == 2 {
-			for i := 0; i < len(list); i++ {
-				list[i] <- true
+
+		switch val := <-mainChan; {
+		case val == "send":
+			{
+				for _, channel := range mapConn {
+					channel <- true
+				}
 			}
+		default: //По идее тут должны быть только сокеты: 192.168.0.3:12312 удалить пользователя из рассылки
+			{
+				i, _ := mapConn[val]
+				close(i)
+				delete(mapConn, val)
+			}
+
 		}
 	}
-	defer wg.Done()
 }
 
+//подключение к БД
 func dbConnection() *sql.DB {
 	connStr := "user=root password=123 dbname=postgres sslmode=disable"
 	db, err := sql.Open("postgres", connStr)
@@ -69,7 +80,8 @@ func dbConnection() *sql.DB {
 	return db
 }
 
-func welcome(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.WaitGroup) {
+//приветственное сообщение, регистрация или авторизация
+func welcome(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
 	db := dbConnection()
 	row := db.QueryRow("select count(*) from users")
 	db.Close()
@@ -102,10 +114,11 @@ func welcome(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.WaitGroup
 
 		}
 	}
-
+	fmt.Println("Закрыт welcome")
 }
 
-func registration(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.WaitGroup) {
+//регистрация нового пользователя
+func registration(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
 	var login, password, passwordConfirmed string
 	for {
 		conn.Write([]byte("Придумайте никнейм:"))
@@ -168,9 +181,11 @@ func registration(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.Wait
 	conn.Write([]byte("Регистрация прошла успешно!\n"))
 	db.Close()
 	authorization(conn, ch, mainChan, wg)
+	fmt.Println("Закрыт registration")
 }
 
-func authorization(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.WaitGroup) {
+//авторизация пользователя
+func authorization(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
 
 	db := dbConnection()
 
@@ -209,7 +224,7 @@ func authorization(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.Wai
 
 		if login == loginFromDb && password == passwordFromDb {
 
-			wg.Add(2)
+			wg.Add(1) // +1 добавлялся в начале
 
 			go sender(wg, conn, db, login, mainChan)
 			go mailing(wg, conn, db, ch)
@@ -217,7 +232,7 @@ func authorization(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.Wai
 			if err != nil {
 				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
 			}
-			mainChan <- 2
+			mainChan <- "send"
 			break
 		} else {
 			conn.Write([]byte("Неверный логин/пароль\n"))
@@ -228,10 +243,11 @@ func authorization(conn net.Conn, ch chan bool, mainChan chan byte, wg *sync.Wai
 		}
 
 	}
-
+	fmt.Println("Закрыт authorization")
 }
 
-func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, mainChan chan byte) { //отправка принятых сообщений в БД
+//отправка принятых сообщений в БД
+func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, mainChan chan string) {
 	for {
 		buff := make([]byte, 1024)
 
@@ -244,29 +260,33 @@ func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, mainCha
 			if err != nil {
 				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
 			}
-			mainChan <- 2
+			mainChan <- "send"
 		}
 
 	}
-
+	mainChan <- conn.RemoteAddr().String()
+	fmt.Println("Закрыт sender")
 	defer wg.Done()
 	defer db.Close()
 	defer conn.Close()
 }
 
+//отправка последнего сообщения клиенту
 func mailing(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, ch chan bool) {
 	var login, message string
 	for {
-
-		if <-ch {
+		_, ok := <-ch
+		if ok {
 			row := db.QueryRow("select login, message from chatlog order by id desc limit 1")
 			err := row.Scan(&login, &message)
 			if err != nil {
 				fmt.Printf("Ошибка:", err)
+				break
 			}
 			conn.Write([]byte(login + ": " + message + "\n"))
 		}
 	}
+	fmt.Println("Закрыт mailing")
 	defer wg.Done()
 	defer db.Close()
 	defer conn.Close()
