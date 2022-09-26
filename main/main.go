@@ -5,11 +5,10 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 )
-
-var mapConn map[string]chan bool
 
 func main() {
 	var wg sync.WaitGroup
@@ -22,10 +21,10 @@ func main() {
 	defer listener.Close()
 	fmt.Println("Server is running...")
 
-	mapConn = make(map[string]chan bool)
 	mainChan := make(chan string)
-	go mainChanListener(mainChan)
-
+	listChan := make(chan net.Conn)
+	wg.Add(1)
+	go mainChanListener(mainChan, listChan, &wg)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -33,40 +32,49 @@ func main() {
 			conn.Close()
 			continue
 		}
+		listChan <- conn
 
-		ch := make(chan bool)
-		wg.Add(1)
-
-		go welcome(conn, ch, mainChan, &wg)
-
-		mapConn[conn.RemoteAddr().String()] = ch
+		fmt.Println("main 2 -NumGoroutine - ", runtime.NumGoroutine())
 
 	}
-
 	wg.Wait()
 
 }
 
 //управление рассылкой последнего сообщения всем пользователям
-func mainChanListener(mainChan chan string) {
+func mainChanListener(mainChan chan string, listChan chan net.Conn, wg *sync.WaitGroup) {
+	mapConn := make(map[string]chan bool)
 	for {
-
-		switch val := <-mainChan; {
-		case val == "send":
+		select {
+		case conn := <-listChan:
 			{
-				for _, channel := range mapConn {
-					channel <- true
+				ch := make(chan bool)
+				mapConn[conn.RemoteAddr().String()] = ch
+				go welcome(conn, ch, mainChan)
+			}
+		case val := <-mainChan:
+			{
+				switch val {
+				case "send":
+					{
+						for _, channel := range mapConn {
+							channel <- true
+						}
+					}
+				default: //По идее тут должны быть только сокеты: 192.168.0.3:12312 удалить пользователя из рассылки
+					{
+						i, ok := mapConn[val]
+						fmt.Println(ok)
+						close(i)
+						delete(mapConn, val)
+					}
+
 				}
 			}
-		default: //По идее тут должны быть только сокеты: 192.168.0.3:12312 удалить пользователя из рассылки
-			{
-				i, _ := mapConn[val]
-				close(i)
-				delete(mapConn, val)
-			}
-
 		}
+
 	}
+	defer wg.Done()
 }
 
 //подключение к БД
@@ -81,153 +89,151 @@ func dbConnection() *sql.DB {
 }
 
 //приветственное сообщение, регистрация или авторизация
-func welcome(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
+func welcome(conn net.Conn, ch chan bool, mainChan chan string) {
 	db := dbConnection()
 	row := db.QueryRow("select count(*) from users")
 	db.Close()
-	var count byte
+	var count int
 	err := row.Scan(&count)
 	if err != nil {
 		fmt.Printf("Ошибка:", err)
 	}
 	if count == 0 {
-		registration(conn, ch, mainChan, wg)
+		registration(conn, mainChan)
 	} else {
-
 		for {
-			conn.Write([]byte("У вас имеется учетная запись? (y/n):"))
-			buff := make([]byte, 1024)
-
-			n, err := conn.Read(buff)
-
+			writer(conn, "У вас имеется учетная запись? (y/n):")
+			val, err := reader(conn, mainChan)
 			if err != nil {
 				break
 			}
-			answ := strings.ToLower(string(buff[0:n]))
-			if answ == "n" {
-				registration(conn, ch, mainChan, wg)
-				break
-			} else if answ == "y" {
-				authorization(conn, ch, mainChan, wg)
-				break
-			}
+			switch strings.ToLower(val) {
+			case "n":
+				{
+					if registration(conn, mainChan) != nil {
+						break
+					}
+					authorization(conn, ch, mainChan)
+					break
+				}
+			case "y":
+				{
+					authorization(conn, ch, mainChan)
+					break
+				}
+			case "":
+				{
+					break
+				}
 
+			default:
+				continue
+			}
+			break
 		}
+
 	}
-	fmt.Println("Закрыт welcome")
+	fmt.Println("Welcome - NumGoroutine - ", runtime.NumGoroutine())
+}
+
+func reader(conn net.Conn, mainChan chan string) (string, error) {
+	buff := make([]byte, 1024)
+	n, err := conn.Read(buff)
+	if err != nil {
+		mainChan <- conn.RemoteAddr().String()
+		return "", err
+	}
+	//fmt.Println(buff[n:n])
+	return string(buff[0:n]), nil
 }
 
 //регистрация нового пользователя
-func registration(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
+func registration(conn net.Conn, mainChan chan string) error {
 	var login, password, passwordConfirmed string
+	var err error
+	ok := false
 	for {
-		conn.Write([]byte("Придумайте никнейм:"))
-		for {
-			buff := make([]byte, 1024)
-
-			n, err := conn.Read(buff)
-			if err != nil {
-				break
-			}
-			login = string(buff[0:n])
+		writer(conn, "Придумайте никнейм:")
+		login, err = reader(conn, mainChan)
+		if err != nil {
 			break
 		}
-		conn.Write([]byte("Придумайте пароль:"))
-		for {
-			buff := make([]byte, 1024)
-
-			n, err := conn.Read(buff)
-			if err != nil {
-				break
-			}
-			password = string(buff[0:n])
+		writer(conn, "Придумайте пароль:")
+		password, err = reader(conn, mainChan)
+		if err != nil {
 			break
 		}
-		conn.Write([]byte("Повторите пароль:"))
-		for {
-			buff := make([]byte, 1024)
-
-			n, err := conn.Read(buff)
-			if err != nil {
-				break
-			}
-			passwordConfirmed = string(buff[0:n])
+		writer(conn, "Повторите пароль:")
+		passwordConfirmed, err = reader(conn, mainChan)
+		if err != nil {
 			break
 		}
 		if password != passwordConfirmed {
-			conn.Write([]byte("Введеные пароли не совпадают. Повторите попытку\n"))
+			writer(conn, "Введеные пароли не совпадают. Повторите попытку\n")
 			continue
 		}
 		db := dbConnection()
 		row := db.QueryRow("select count(*) from users where login = '" + login + "'")
 		db.Close()
 		var count byte
-		err := row.Scan(&count)
+		err = row.Scan(&count)
 		if err != nil {
 			fmt.Printf("Ошибка:", err)
 		}
 		if count != 0 {
-			conn.Write([]byte("Пользователь с таким логином уже существует\n"))
+			writer(conn, "Пользователь с таким логином уже существует\n")
 			continue
 		} else {
+			ok = true
 			break
 		}
 	}
-	db := dbConnection()
-	_, err := db.Query("insert into users values ('" + login + "', '" + password + "')")
-	if err != nil {
-		fmt.Println("Ошибка вставки данных в таблицу:", err)
+	fmt.Println("aesdasd:", ok)
+	if ok {
+		db := dbConnection()
+		_, err = db.Query("insert into users values ('" + login + "', '" + password + "')")
+		if err != nil {
+			fmt.Println("Ошибка вставки данных в таблицу:", err)
+		}
+		writer(conn, "Регистрация прошла успешно!\n")
+		db.Close()
+		return nil
+	} else {
+		return err
 	}
-	conn.Write([]byte("Регистрация прошла успешно!\n"))
-	db.Close()
-	authorization(conn, ch, mainChan, wg)
-	fmt.Println("Закрыт registration")
+}
+
+func writer(conn net.Conn, s string) {
+	conn.Write([]byte(s))
 }
 
 //авторизация пользователя
-func authorization(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.WaitGroup) {
-
+func authorization(conn net.Conn, ch chan bool, mainChan chan string) {
 	db := dbConnection()
-
 	for i := 0; i < 3; i++ {
-		var login, password string
-		conn.Write([]byte("Введите логин:"))
-		for {
-			buff := make([]byte, 1024)
 
-			n, err := conn.Read(buff)
-			if err != nil {
-				break
-			}
-			login = string(buff[0:n])
+		writer(conn, "Введите логин:")
+		login, err := reader(conn, mainChan)
+		if err != nil {
 			break
 		}
-		conn.Write([]byte("Введите пароль:"))
-		for {
-			buff := make([]byte, 1024)
-
-			n, err := conn.Read(buff)
-			if err != nil {
-				break
-			}
-			password = string(buff[0:n])
+		writer(conn, "Введите пароль:")
+		password, err := reader(conn, mainChan)
+		if err != nil {
 			break
 		}
 
 		row := db.QueryRow("select login, pass from users where login='" + login + "'")
 
 		var loginFromDb, passwordFromDb string
-		err := row.Scan(&loginFromDb, &passwordFromDb)
+		err = row.Scan(&loginFromDb, &passwordFromDb)
 		if err != nil {
 			fmt.Printf("Ошибка:", err)
 		}
 
 		if login == loginFromDb && password == passwordFromDb {
-
-			wg.Add(1) // +1 добавлялся в начале
-
-			go sender(wg, conn, db, login, mainChan)
-			go mailing(wg, conn, db, ch)
+			go sender(conn, db, login, mainChan)
+			go mailing(conn, db, ch)
 			_, err = db.Query("insert into chatlog values (default, 'Server', 'Пользователь " + login + " присоединился')")
 			if err != nil {
 				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
@@ -235,44 +241,41 @@ func authorization(conn net.Conn, ch chan bool, mainChan chan string, wg *sync.W
 			mainChan <- "send"
 			break
 		} else {
-			conn.Write([]byte("Неверный логин/пароль\n"))
+			writer(conn, "Неверный логин/пароль\n")
 			if i == 2 {
-				conn.Write([]byte("До свидания!"))
+				writer(conn, "До свидания!")
 				conn.Close()
 			}
 		}
 
 	}
-	fmt.Println("Закрыт authorization")
+	fmt.Println("authorization - NumGoroutine - ", runtime.NumGoroutine())
 }
 
 //отправка принятых сообщений в БД
-func sender(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, login string, mainChan chan string) {
+func sender(conn net.Conn, db *sql.DB, login string, mainChan chan string) {
 	for {
-		buff := make([]byte, 1024)
-
-		n, err := conn.Read(buff)
+		message, err := reader(conn, mainChan)
 		if err != nil {
 			break
 		}
-		if len(buff) != 0 {
-			_, err = db.Query("insert into chatlog values (default, '" + login + "', '" + string(buff[0:n]) + "')")
+		if len(message) != 0 {
+			_, err := db.Query("insert into chatlog values (default, '" + login + "', '" + message + "')")
 			if err != nil {
 				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
 			}
 			mainChan <- "send"
+		} else {
+			break
 		}
-
 	}
-	mainChan <- conn.RemoteAddr().String()
-	fmt.Println("Закрыт sender")
-	defer wg.Done()
-	defer db.Close()
+	//fmt.Println("sender - NumGoroutine - ", runtime.NumGoroutine())
 	defer conn.Close()
+	defer db.Close()
 }
 
 //отправка последнего сообщения клиенту
-func mailing(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, ch chan bool) {
+func mailing(conn net.Conn, db *sql.DB, ch chan bool) {
 	var login, message string
 	for {
 		_, ok := <-ch
@@ -283,12 +286,13 @@ func mailing(wg *sync.WaitGroup, conn net.Conn, db *sql.DB, ch chan bool) {
 				fmt.Printf("Ошибка:", err)
 				break
 			}
-			conn.Write([]byte(login + ": " + message + "\n"))
+			writer(conn, login+": "+message+"\n")
+
+		} else {
+			break
 		}
 	}
-	fmt.Println("Закрыт mailing")
-	defer wg.Done()
-	defer db.Close()
+	//fmt.Println("mailing - NumGoroutine - ", runtime.NumGoroutine())
 	defer conn.Close()
-	defer close(ch)
+	defer db.Close()
 }
