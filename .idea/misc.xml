@@ -4,11 +4,7 @@
     <option name="openedFilesInfos">
       <list>
         <OpenedFileInfo>
-          <option name="caretOffset" value="4189" />
-          <option name="fileUrl" value="file:///usr/local/go/src/net/net.go" />
-        </OpenedFileInfo>
-        <OpenedFileInfo>
-          <option name="caretOffset" value="2569" />
+          <option name="caretOffset" value="0" />
           <option name="fileUrl" value="file://$PROJECT_DIR$/main/main.go" />
         </OpenedFileInfo>
       </list>
