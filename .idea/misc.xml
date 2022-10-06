@@ -4,8 +4,20 @@
     <option name="openedFilesInfos">
       <list>
         <OpenedFileInfo>
+          <option name="caretOffset" value="428" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/handler/handler.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
           <option name="caretOffset" value="0" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/view/chat.html" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="1852" />
           <option name="fileUrl" value="file://$PROJECT_DIR$/main/main.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="2614" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/common/common.go" />
         </OpenedFileInfo>
       </list>
     </option>

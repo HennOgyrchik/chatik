@@ -1,12 +1,16 @@
 package main
 
 import (
-	"database/sql"
+	"chatik/common"
+	"chatik/handler"
 	"fmt"
-	_ "github.com/lib/pq"
+	"github.com/labstack/echo/v4"
+	"html/template"
+	"io"
 	"net"
 	_ "runtime"
 	"strings"
+	"sync"
 )
 
 type users struct {
@@ -18,7 +22,19 @@ type users struct {
 	isAuthorized bool
 }
 
+type TemplateRegistry struct {
+	templates *template.Template
+}
+
 func main() {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go httpServ()
+	go cliServ()
+	wg.Wait()
+}
+
+func cliServ() {
 	listener, err := net.Listen("tcp", ":4545")
 
 	if err != nil {
@@ -26,12 +42,23 @@ func main() {
 		return
 	}
 	defer listener.Close()
+	db, err := common.DbConnection()
+	if err != nil {
+		fmt.Println("Ошибка подключения к БД: ", err)
+		return
+	}
+	_, err = db.Query("insert into chatlog values (default, 'Server', 'Server is running..')")
+	if err != nil {
+		fmt.Println("Ошибка отправки сообщения в таблицу:", err)
+	}
+	db.Close()
 	fmt.Println("Server is running...")
 
 	mainChan := make(chan string)
-	mapUsers := make(map[string]*users)
+	//mapUsers := make(map[string]*users)
 
-	go mainChanListener(mapUsers, mainChan)
+	go common.MainChanListener(mainChan)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -39,20 +66,40 @@ func main() {
 			conn.Close()
 			continue
 		}
-		addUserToMap(mapUsers, mainChan, conn)
 
+		ch := make(chan bool)
+		user := common.UserCLI{Conn: conn, MainChan: mainChan, Ch: ch, Ip: conn.RemoteAddr().String(), IsAuthorized: false}
+		common.AddUserToMap(&user)
+		go welcome(&user)
 		//fmt.Println("main 2 -NumGoroutine - ", runtime.NumGoroutine())
 	}
 }
 
-//добавление нового пользователя в mapUser
-func addUserToMap(mapUsers map[string]*users, mainChan chan string, conn net.Conn) {
-	ch := make(chan bool)
-	user := users{conn: conn, mainChan: mainChan, ch: ch, ip: conn.RemoteAddr().String(), isAuthorized: false}
-	mapUsers[user.ip] = &user
-	go welcome(&user)
+func (t *TemplateRegistry) Render(w io.Writer, name string, data interface{}, c echo.Context) error {
+	return t.templates.ExecuteTemplate(w, name, data)
 }
 
+func httpServ() {
+	e := echo.New()
+
+	// Instantiate a template registry and register all html files inside the view folder
+	e.Renderer = &TemplateRegistry{
+		templates: template.Must(template.ParseGlob("view/*.html")),
+	}
+
+	// Route => handler
+	e.GET("/", handler.HomeHandler)
+	e.POST("/", handler.Authorization)
+	e.GET("/registration", handler.RegistrationPage)
+	e.POST("/registration", handler.Registration)
+	e.POST("/chat", handler.ChatPage)
+	e.GET("/chat", handler.UsrList)
+
+	// Start the Echo server
+	e.Logger.Fatal(e.Start(":1010"))
+}
+
+/*
 func mainChanListener(mapUsers map[string]*users, mainChan chan string) {
 	for {
 		val := <-mainChan
@@ -77,8 +124,9 @@ func mainChanListener(mapUsers map[string]*users, mainChan chan string) {
 
 		}
 	}
-}
+}*/
 
+/*
 //подключение к БД
 func dbConnection() *sql.DB {
 	connStr := "user=root password=123 dbname=postgres sslmode=disable"
@@ -88,169 +136,118 @@ func dbConnection() *sql.DB {
 		fmt.Printf("Ошибка подключения к БД:%s\n", err)
 	}
 	return db
-}
-
-//функция чтения
-func reader(user *users) (string, error) {
-	buff := make([]byte, 1024)
-	n, err := user.conn.Read(buff)
-	if err != nil {
-		user.mainChan <- user.ip
-		return "", err
-	}
-	return string(buff[0:n]), nil
-}
-
-//функция записи
-func writer(conn net.Conn, s string) {
-	conn.Write([]byte(s))
-}
+}*/
 
 //приветственное сообщение, регистрация или авторизация
-func welcome(user *users) {
-	db := dbConnection()
-	row := db.QueryRow("select count(*) from users")
-	db.Close()
-	var count int
-	err := row.Scan(&count)
-	if err != nil {
-		fmt.Printf("Ошибка:", err)
-	}
-	if count == 0 {
-		registration(user)
-	} else {
-		for {
-			writer(user.conn, "У вас имеется учетная запись? (y/n):")
-			val, err := reader(user)
-			if err != nil {
-				break
-			}
-			switch strings.ToLower(val) {
-			case "n":
-				if registration(user) != nil {
-					return
-				}
-			case "y":
-			case "":
-				return
-			default:
-				continue
-			}
-			authorization(user)
+func welcome(user *common.UserCLI) {
+	for {
+		user.Writer("У вас имеется учетная запись? (y/n):")
+		val, err := user.Reader()
+		if err != nil {
 			break
 		}
-
+		switch strings.ToLower(val) {
+		case "n":
+			{
+				if getUserPropertyForRegistration(user) != nil {
+					return
+				}
+			}
+		case "y":
+		case "":
+			return
+		default:
+			continue
+		}
+		authorization(user)
+		break
 	}
 	fmt.Println("welcome закрыт")
 	//fmt.Println("Welcome - NumGoroutine - ", runtime.NumGoroutine())
 }
 
-//регистрация нового пользователя
-func registration(user *users) error {
+func getUserPropertyForRegistration(user *common.UserCLI) error {
 	var login, password, passwordConfirmed string
 	var err error
-	ok := false
+
 	for {
-		writer(user.conn, "Придумайте никнейм:")
-		login, err = reader(user)
+		user.Writer("Придумайте никнейм:")
+		login, err = user.Reader()
 		if err != nil {
 			break
 		}
-		writer(user.conn, "Придумайте пароль:")
-		password, err = reader(user)
+		user.Writer("Придумайте пароль:")
+		password, err = user.Reader()
 		if err != nil {
 			break
 		}
-		writer(user.conn, "Повторите пароль:")
-		passwordConfirmed, err = reader(user)
+		user.Writer("Повторите пароль:")
+		passwordConfirmed, err = user.Reader()
 		if err != nil {
 			break
 		}
 		if password != passwordConfirmed {
-			writer(user.conn, "Введеные пароли не совпадают. Повторите попытку\n")
+			user.Writer("Введеные пароли не совпадают. Повторите попытку\n")
 			continue
 		}
-		db := dbConnection()
-		row := db.QueryRow("select count(*) from users where login = '" + login + "'")
-		db.Close()
-		var count byte
-		err = row.Scan(&count)
+		err = common.Registration(login, password)
 		if err != nil {
-			fmt.Printf("Ошибка:", err)
-		}
-		if count != 0 {
-			writer(user.conn, "Пользователь с таким логином уже существует\n")
-			continue
+			user.Writer(err.Error())
 		} else {
-			ok = true
+			user.Writer("Регистрация прошла успешно!\n")
 			break
 		}
-	}
 
-	if ok {
-		db := dbConnection()
-		_, err = db.Query("insert into users values ('" + login + "', '" + password + "')")
-		if err != nil {
-			fmt.Println("Ошибка вставки данных в таблицу:", err)
-		}
-		writer(user.conn, "Регистрация прошла успешно!\n")
-		db.Close()
-		return nil
-	} else {
-		return err
 	}
+	return err
 }
 
 //авторизация пользователя
-func authorization(user *users) {
-	db := dbConnection()
+func authorization(user *common.UserCLI) {
 	for i := 0; i < 3; i++ {
 
-		writer(user.conn, "Введите логин:")
+		user.Writer("Введите логин:")
 		var err error
-		user.login, err = reader(user)
+		user.Login, err = user.Reader()
 		if err != nil {
 			break
 		}
-		writer(user.conn, "Введите пароль:")
-		password, err := reader(user)
+		user.Writer("Введите пароль:")
+		password, err := user.Reader()
 		if err != nil {
 			break
 		}
-
-		row := db.QueryRow("select login, pass from users where login='" + user.login + "'")
-
-		var loginFromDb, passwordFromDb string
-		err = row.Scan(&loginFromDb, &passwordFromDb)
+		err = common.Authorization(user.Login, password)
 		if err != nil {
-			fmt.Printf("Ошибка:", err)
-		}
-
-		if user.login == loginFromDb && password == passwordFromDb {
-			user.isAuthorized = true
-			go user.sender(db)
-			go user.mailing(db)
-			_, err = db.Query("insert into chatlog values (default, 'Server', 'Пользователь " + user.login + " присоединился')")
-			if err != nil {
-				fmt.Println("Ошибка отправки сообщения в таблицу:", err)
-			}
-			user.mainChan <- "send"
-			break
-		} else {
-			writer(user.conn, "Неверный логин/пароль\n")
 			if i == 2 {
-				writer(user.conn, "До свидания!")
-				user.conn.Close()
+				user.Writer("Пока!")
+				user.Conn.Close()
+				break
 			}
+			user.Writer(err.Error())
+			continue
 		}
+
+		user.IsAuthorized = true
+		db, err := common.DbConnection()
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+		go user.SenderCLI(db)
+		go user.Mailing(db)
+
+		user.MainChan <- "send"
+		break
 
 	}
 	fmt.Println("authorization закрыт")
 	//fmt.Println("authorization - NumGoroutine - ", runtime.NumGoroutine())
 }
 
+/*
 //отправка принятых сообщений в БД
-func (u users) sender(db *sql.DB) {
+func (u common.UserCLI) sender(db *sql.DB) {
 	for {
 		message, err := reader(&u)
 		if err != nil {
@@ -270,6 +267,7 @@ func (u users) sender(db *sql.DB) {
 	fmt.Println("sender закрыт")
 	defer db.Close()
 }
+/*
 
 //отправка последнего (нового) сообщения клиенту
 func (u users) mailing(db *sql.DB) {
@@ -290,4 +288,4 @@ func (u users) mailing(db *sql.DB) {
 		}
 	}
 	fmt.Println("mailing закрыт")
-}
+}*/
